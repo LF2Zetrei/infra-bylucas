@@ -1,0 +1,5 @@
+# Copie ce fichier en terraform.tfvars et remplis avec tes vraies valeurs.
+# terraform.tfvars ne doit JAMAIS être commit dans git (voir .gitignore).
+
+domain_name = "bylucas.eu"
+vps_ip      = "203.0.113.10"

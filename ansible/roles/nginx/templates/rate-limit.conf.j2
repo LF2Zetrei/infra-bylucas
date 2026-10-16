@@ -1,0 +1,5 @@
+# Zone de rate limiting partagée - chaque projet peut l'activer avec :
+#     limit_req zone=global_limit burst=20 nodelay;
+# dans son propre bloc location.
+
+limit_req_zone $binary_remote_addr zone=global_limit:10m rate={{ nginx_rate_limit_rps }}r/s;

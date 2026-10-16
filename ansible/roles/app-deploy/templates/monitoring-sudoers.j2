@@ -1,0 +1,11 @@
+# Généré automatiquement par Ansible - ne pas éditer à la main, sera écrasé.
+{% for p in projects if p.type != 'static' %}
+lucas ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart {{ p.name }}
+{% endfor %}
+{% for c in docker_containers %}
+lucas ALL=(ALL) NOPASSWD: /usr/bin/docker restart {{ c }}
+{% endfor %}
+{% for p in projects if p.subdomain is defined and not (p.subdomain is regex('^[0-9.]+$')) %}
+lucas ALL=(ALL) NOPASSWD: /usr/bin/certbot install --nginx --cert-name {{ p.subdomain }}
+lucas ALL=(ALL) NOPASSWD: /usr/bin/certbot renew --cert-name {{ p.subdomain }} --force-renewal
+{% endfor %}

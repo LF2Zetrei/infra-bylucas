@@ -1,0 +1,39 @@
+---
+# Serveur Minecraft "Homestead" (modpack CurseForge, Fabric 1.20.1), via
+# l'image itzg/minecraft-server. Suppose que le rôle "docker" a déjà tourné
+# (Docker Engine installé) - pas de duplication ici.
+#
+# Contrairement à tous tes autres projets, ce service est exposé DIRECTEMENT
+# au public (port TCP brut 25565, pas de HTTP, donc pas de nginx/HTTPS
+# possible) - c'est le seul port de ce type ouvert sur le VPS.
+
+- name: Créer le dossier de données persistantes Minecraft
+  ansible.builtin.file:
+    path: /var/minecraft-homestead-data
+    state: directory
+    mode: "0755"
+
+- name: Vérifier si le conteneur Minecraft existe déjà
+  ansible.builtin.command: docker ps -a --filter "name=homestead" --format "{{ '{{.Names}}' }}"
+  register: homestead_container_check
+  changed_when: false
+
+- name: Lancer le conteneur Minecraft (RAM plafonnée, exposé publiquement sur 25565)
+  ansible.builtin.command: >
+    docker run -d
+    --name homestead
+    --restart unless-stopped
+    -p 25565:25565
+    -e EULA=TRUE
+    -e TYPE=AUTO_CURSEFORGE
+    -e CF_API_KEY={{ vault_curseforge_api_key }}
+    -e CF_SLUG={{ minecraft_cf_slug }}
+    {% if minecraft_cf_file_id is defined %}-e CF_FILE_ID={{ minecraft_cf_file_id }}{% endif %}
+    -e MEMORY={{ minecraft_heap }}
+    -v /var/minecraft-homestead-data:/data
+    itzg/minecraft-server:java17
+  when: "'homestead' not in homestead_container_check.stdout"
+
+- name: S'assurer que le conteneur démarre au boot
+  ansible.builtin.command: docker update --restart unless-stopped homestead
+  changed_when: false

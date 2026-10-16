@@ -1,0 +1,15 @@
+# Repo séparé (LF2Zetrei/infra-github-actions), pas inclus ici.
+github-actions/
+
+# Filets de sécurité globaux (chaque sous-dossier a aussi son propre .gitignore)
+.env
+*.pem
+*.key
+id_*
+vault_pass*.txt
+*.tfstate
+*.tfstate.*
+.terraform/
+terraform.tfvars
+.DS_Store
+.vscode/

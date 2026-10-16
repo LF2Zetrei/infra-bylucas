@@ -1,0 +1,12 @@
+---
+postgresql_version: "16"
+postgresql_backup_dir: /var/backups/postgresql
+postgresql_backup_retention_days: 14
+
+# À surcharger dans group_vars/all.yml ou via un vault - jamais en clair ici.
+# Exemple de structure attendue :
+# postgresql_app_users:
+#   - name: projet1_user
+#     password: "{{ vault_projet1_db_password }}"
+#     db: projet1_db
+postgresql_app_users: []

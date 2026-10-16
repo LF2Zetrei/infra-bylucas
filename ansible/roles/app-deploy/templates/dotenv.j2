@@ -1,0 +1,6 @@
+{# Généré automatiquement par Ansible - ne pas éditer à la main sur le VPS,
+   toute modification serait écrasée au prochain "ansible-playbook".
+   Source : env_vars dans group_vars/all.yml (valeurs sensibles via vault). #}
+{% for key, value in item.env_vars.items() %}
+{{ key }}={{ value }}
+{% endfor %}

@@ -1,0 +1,26 @@
+---
+# Étape 5 de la liste : Mises à jour automatiques
+
+- name: Installer unattended-upgrades
+  ansible.builtin.apt:
+    name:
+      - unattended-upgrades
+      - apt-listchanges
+    state: present
+    update_cache: true
+
+- name: Activer les mises à jour de sécurité automatiques
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: S'assurer que le service tourne
+  ansible.builtin.service:
+    name: unattended-upgrades
+    state: started
+    enabled: true

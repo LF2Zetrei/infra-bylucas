@@ -1,0 +1,227 @@
+---
+# Étape 11 de la liste : Process manager
+# Génère un service systemd + une config nginx par projet déclaré dans
+# la variable "projects" (voir group_vars/all.yml pour la convention).
+#
+# Principe : Ansible ne gère QUE l'infrastructure (dossier, service, nginx,
+# certs). Le CODE, le venv et les dépendances arrivent via le CD (GitHub
+# Actions, voir infra/github-actions) au premier "git push" — jamais besoin
+# de cloner quoi que ce soit manuellement sur le VPS.
+#
+# Pour ne toucher qu'UN SEUL projet (ex: ajout d'un nouveau) sans repasser
+# sur ceux déjà en prod, filtre avec target_projects (voir defaults/main.yml) :
+#   ansible-playbook -i inventory.yml playbook.yml --ask-vault-pass \
+#     -e '{"target_projects": ["entry-generator"]}'
+
+- name: Déterminer la liste des projets à traiter (tous, ou un sous-ensemble ciblé)
+  ansible.builtin.set_fact:
+    projects_to_process: >-
+      {{ (projects | selectattr('name', 'in', target_projects) | list)
+         if (target_projects | length > 0) else projects }}
+
+- name: S'assurer que python3-venv est installé (nécessaire au CD pour créer les venv)
+  ansible.builtin.apt:
+    name: python3-venv
+    state: present
+
+- name: Vérifier si Node.js est déjà installé
+  ansible.builtin.command: which node
+  register: node_check
+  changed_when: false
+  failed_when: false
+
+- name: Ajouter le dépôt NodeSource (Node.js LTS)
+  ansible.builtin.shell: curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+  when: node_check.rc != 0
+
+- name: Installer Node.js
+  ansible.builtin.apt:
+    name: nodejs
+    state: present
+  when: node_check.rc != 0
+
+- name: Créer le dossier de chaque projet avec process (vide au départ, rempli par le CD)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0755"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.type != "static"
+
+- name: "Générer le .env de chaque projet qui en déclare un (remplace le scp manuel)"
+  ansible.builtin.template:
+    src: dotenv.j2
+    dest: "{{ item.path }}/.env"
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0600"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.env_vars is defined
+  no_log: true  # les valeurs (tokens, mots de passe) ne doivent jamais apparaître dans les logs Ansible
+
+- name: Créer le fichier systemd de chaque projet (sauf static, qui n'a pas de process)
+  ansible.builtin.template:
+    src: "systemd-{{ item.type }}.service.j2"
+    dest: "/etc/systemd/system/{{ item.name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.type != "static"
+  notify: Recharger systemd
+
+- name: Activer et démarrer chaque service projet (sauf static)
+  ansible.builtin.systemd:
+    name: "{{ item.name }}.service"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.type != "static"
+  # Tolérant : si le code n'a pas encore été déployé par le CD (premier
+  # setup), le démarrage échoue normalement (script introuvable) - ce n'est
+  # pas une vraie erreur, juste "en attente du premier push". Le service
+  # démarrera automatiquement une fois le code livré par le CD.
+  # Pour un projet DÉJÀ actif, "state: started" est idempotent : aucun
+  # redémarrage n'a lieu si le service tourne déjà normalement.
+  failed_when: false
+
+- name: Créer le dossier racine des sites statiques
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0755"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.type == "static"
+
+- name: "Générer le fichier .htpasswd (projets avec basic_auth activé)"
+  community.general.htpasswd:
+    path: "/etc/nginx/.htpasswd_{{ item.name }}"
+    name: "{{ item.basic_auth_user | default('lucas') }}"
+    password: "{{ item.basic_auth_password }}"
+    owner: root
+    group: www-data
+    mode: "0640"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: item.basic_auth | default(false)
+  no_log: true
+
+- name: Vérifier si la config nginx de chaque projet est déjà gérée par Certbot
+  ansible.builtin.shell: >
+    test -f /etc/nginx/sites-available/{{ item.name }} &&
+    grep -q 'managed by Certbot' /etc/nginx/sites-available/{{ item.name }}
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: certbot_managed_check
+  changed_when: false
+  failed_when: false
+  # rc == 0 : le fichier existe ET contient déjà les blocs Certbot -> ne
+  # jamais y toucher. rc != 0 : fichier absent ou pas encore géré par
+  # Certbot -> sûr de (re)générer depuis notre template.
+
+- name: "Générer la config nginx (projets avec process, proxy_pass) - JAMAIS si déjà géré par Certbot"
+  ansible.builtin.template:
+    src: "{{ role_path }}/../nginx/templates/project-site.conf.j2"
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+    extended: true
+  # Une fois le certificat émis, Certbot a modifié ce fichier en direct pour
+  # y ajouter les blocs HTTPS - on ne le régénère JAMAIS après coup, sinon
+  # on écrase ces blocs et le site devient injoignable en HTTPS (déjà vécu
+  # deux fois). Check direct sur le contenu du fichier, pas une simple
+  # présomption basée sur l'existence du certificat ailleurs.
+  when: item.type != "static" and certbot_managed_check.results[ansible_loop.index0].rc != 0
+  notify: Recharger nginx
+
+- name: "Générer la config nginx (projets statiques, fichiers servis directement) - JAMAIS si déjà géré par Certbot"
+  ansible.builtin.template:
+    src: "{{ role_path }}/../nginx/templates/static-site.conf.j2"
+    dest: "/etc/nginx/sites-available/{{ item.name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+    extended: true
+  when: item.type == "static" and certbot_managed_check.results[ansible_loop.index0].rc != 0
+  notify: Recharger nginx
+
+- name: Activer chaque site nginx
+  ansible.builtin.file:
+    src: "/etc/nginx/sites-available/{{ item.name }}"
+    dest: "/etc/nginx/sites-enabled/{{ item.name }}"
+    state: link
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Recharger nginx
+
+# Certbot a besoin que le site HTTP soit déjà actif et joignable pour valider
+# le domaine (challenge HTTP-01) - on force le reload nginx MAINTENANT plutôt
+# que d'attendre la fin du playbook (les handlers ne tournent qu'à la fin).
+- name: Appliquer immédiatement la config nginx avant Certbot
+  ansible.builtin.meta: flush_handlers
+
+- name: Générer le certificat HTTPS (Certbot), un par projet ayant un vrai sous-domaine
+  ansible.builtin.command:
+    cmd: >
+      certbot --nginx
+      -d {{ item.subdomain }}
+      --non-interactive --agree-tos
+      -m {{ certbot_email }}
+      --redirect
+    creates: "/etc/letsencrypt/live/{{ item.subdomain }}/fullchain.pem"
+  loop: "{{ projects_to_process }}"
+  loop_control:
+    label: "{{ item.name }}"
+  # Ignore les sous-domaines qui sont en fait une IP brute (test temporaire,
+  # Certbot ne peut pas émettre de certificat pour une IP).
+  when: not (item.subdomain is regex('^[0-9.]+$'))
+
+- name: Générer le manifeste des projets pour l'outil de monitoring
+  ansible.builtin.copy:
+    dest: /etc/services-manifest.json
+    content: "{{ projects | to_nice_json }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Générer le manifeste infra (services système + conteneurs Docker)
+  ansible.builtin.copy:
+    dest: /etc/infra-manifest.json
+    content: "{{ {'infra_services': infra_services, 'docker_containers': docker_containers} | to_nice_json }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Générer les droits sudo pour le monitoring (restart services + certbot)
+  ansible.builtin.template:
+    src: monitoring-sudoers.j2
+    dest: /etc/sudoers.d/monitoring-restart
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"

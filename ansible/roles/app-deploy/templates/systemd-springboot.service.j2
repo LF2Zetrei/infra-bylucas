@@ -1,0 +1,15 @@
+[Unit]
+Description={{ item.name }} (Spring Boot)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User={{ ssh_user }}
+WorkingDirectory={{ item.path }}
+EnvironmentFile={{ item.path }}/.env
+ExecStart=/usr/bin/java -jar {{ item.path }}/target/{{ item.jar | default('app.jar') }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

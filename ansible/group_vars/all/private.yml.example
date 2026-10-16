@@ -1,0 +1,6 @@
+---
+# Copier en private.yml (même dossier) et remplir. private.yml n'est jamais
+# versionné. L'extension ".example" empêche Ansible de charger ce fichier.
+
+# Email utilisé par Certbot/Let's Encrypt pour les alertes d'expiration de certificat
+certbot_email: you@example.com

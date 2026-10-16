@@ -1,0 +1,7 @@
+---
+# Modèles utilisés par langgraph-auto-readme. Léger, un seul chargé à la fois
+# grâce à OLLAMA_MAX_LOADED_MODELS=1 (voir tasks/main.yml).
+ollama_models:
+  - qwen2.5
+  - deepseek-coder:6.7b
+  - qwen2.5vl:3b

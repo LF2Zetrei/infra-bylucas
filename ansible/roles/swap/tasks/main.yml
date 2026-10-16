@@ -1,0 +1,41 @@
+---
+# Filet de sécurité contre l'OOM killer : sans swap, un pic de RAM (ex:
+# inférence Ollama sur un gros repo) fait tuer le process directement par
+# le noyau, plutôt que de simplement ralentir. Le swap n'accélère rien,
+# il évite juste qu'un pic ponctuel fasse planter un service en plein travail.
+
+- name: Vérifier si un swap est déjà actif
+  ansible.builtin.command: swapon --show
+  register: swap_check
+  changed_when: false
+
+- name: Créer le fichier swap (4 Go)
+  ansible.builtin.command: fallocate -l {{ swap_size }} /swapfile
+  when: swap_check.stdout == ""
+
+- name: Restreindre les permissions du fichier swap
+  ansible.builtin.file:
+    path: /swapfile
+    mode: "0600"
+  when: swap_check.stdout == ""
+
+- name: Formater le fichier en swap
+  ansible.builtin.command: mkswap /swapfile
+  when: swap_check.stdout == ""
+
+- name: Activer le swap
+  ansible.builtin.command: swapon /swapfile
+  when: swap_check.stdout == ""
+
+- name: Rendre le swap permanent (survit à un redémarrage)
+  ansible.builtin.lineinfile:
+    path: /etc/fstab
+    line: "/swapfile none swap sw 0 0"
+    state: present
+
+- name: Ajuster la swappiness (utilise le swap seulement en dernier recours)
+  ansible.posix.sysctl:
+    name: vm.swappiness
+    value: "10"
+    state: present
+    reload: true

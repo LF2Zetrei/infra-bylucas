@@ -1,0 +1,23 @@
+---
+# Liste des secrets attendus par vars.yml et les rôles. Ce fichier n'est
+# qu'un modèle : il ne contient AUCUNE vraie valeur.
+#
+# Créer le vrai vault (jamais versionné) :
+#   ansible-vault create group_vars/all/vault.yml
+# puis y copier ces clés avec les vraies valeurs.
+# L'extension ".example" empêche Ansible de charger ce fichier.
+
+# warp10v2 (.env)
+vault_warp10_write_token: "CHANGE_ME"
+vault_warp10_read_token: "CHANGE_ME"
+
+# catlendar (utilisateur PostgreSQL + .env)
+vault_catlendar_password: "CHANGE_ME"
+vault_catlendar_passcode: "CHANGE_ME"
+vault_catlendar_auth_secret: "CHANGE_ME"
+
+# monitoring (basic auth nginx)
+vault_monitoring_password: "CHANGE_ME"
+
+# minecraft-homestead (téléchargement du modpack CurseForge)
+vault_curseforge_api_key: "CHANGE_ME"

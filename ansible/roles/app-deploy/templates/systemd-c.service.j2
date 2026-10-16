@@ -1,0 +1,15 @@
+[Unit]
+Description={{ item.name }} (C)
+After=network.target
+
+[Service]
+Type=simple
+User={{ ssh_user }}
+WorkingDirectory={{ item.path }}
+EnvironmentFile={{ item.path }}/.env
+ExecStart={{ item.path }}/{{ item.binary | default(item.name) }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,136 @@
+---
+# C'est LE fichier à modifier à chaque nouveau projet.
+# Ajoute une entrée ici, relance "ansible-playbook playbook.yml",
+# et le service systemd + la config nginx sont générés et activés automatiquement.
+#
+# Types supportés (voir roles/app-deploy/templates/) :
+#   node, python, rust, springboot, c, static
+# "static" ne génère ni service ni config nginx dédiée (servi en direct, voir nginx role).
+
+# Liste vide au départ. Ajoute une entrée ici pour chaque projet RÉELLEMENT
+# déployé sur le VPS, au fur et à mesure que tu les développes.
+#
+# Exemple de structure attendue (à copier-coller et adapter, ne pas laisser tel quel) :
+#
+# projects:
+#   - name: app-projet1          # nom unique, utilisé pour le service systemd et le fichier nginx
+#     type: node                 # node | python | rust | springboot | c | static
+#     path: /home/lucas/apps/projet1   # dossier du projet sur le VPS
+#     subdomain: projet1.bylucas.com
+#     port: 3000
+#
+#   - name: jeu-python
+#     type: python
+#     path: /home/lucas/apps/jeu-python
+#     entrypoint: app.py         # spécifique au type python, optionnel (défaut: app.py)
+#     subdomain: jeu.bylucas.com
+#     port: 8501
+#
+#   - name: portfolio             # type static : pas de port, "path" = dossier SERVI par nginx
+#     type: static                # (pas forcément le même dossier que le clone git)
+#     path: /var/www/portfolio
+#     subdomain: portfolio.bylucas.eu
+#
+#   - name: entry-generator        # exemple : outil perso derrière mot de passe, traitement long
+#     type: python
+#     path: /home/lucas/apps/langgraph-auto-readme
+#     entrypoint: web/run.py       # lance l'API FastAPI, pas le CLI directement
+#     subdomain: tools.bylucas.eu
+#     port: 8600
+#     basic_auth: true             # protège l'accès (obligatoire pour un outil non public)
+#     basic_auth_user: lucas
+#     basic_auth_password: "{{ vault_entry_generator_password }}"  # jamais en clair, voir README
+#     proxy_timeout: 1800          # 30 min - le traitement d'un repo peut prendre du temps
+
+projects:
+  - name: portfolio
+    type: static
+    path: /var/www/portfolio
+    subdomain: portfolio.bylucas.eu
+
+  - name: landing
+    type: static
+    path: /var/www/landing
+    subdomain: bylucas.eu
+
+  - name: warp10v2
+    type: node
+    path: /home/lucas/apps/warp10v2
+    subdomain: warp10.bylucas.eu
+    port: 3001                       # un port différent de portfolio/autres node éventuels
+    env_vars:
+      PORT: "3001"
+      NEXT_PUBLIC_BASE_URL: "http://localhost:3001"                   # sans ça, "next start" écoute toujours sur 3000 par défaut
+      WARP10_URL: "http://localhost:8080"
+      WARP10_WRITE_TOKEN: "{{ vault_warp10_write_token }}"
+      WARP10_READ_TOKEN: "{{ vault_warp10_read_token }}"
+
+  - name: front-component
+    type: node
+    path: /home/lucas/apps/front-component
+    subdomain: front-component.bylucas.eu
+    port: 3002
+    env_vars:
+      PORT: "3002"
+  
+  - name: catTree
+    type: node
+    path: /home/lucas/apps/catTree
+    subdomain: catTree.bylucas.eu
+    port: 3003
+    env_vars:
+      PORT: "3003"
+
+  - name: catlendar
+    type: node
+    path: /home/lucas/apps/catlendar
+    subdomain: catlendar.bylucas.eu
+    port: 3004
+    env_vars:
+      PORT: "3004"
+      DATABASE_URL: "postgresql://catlendar:{{vault_catlendar_password}}@localhost:5432/catlendar"
+      PASSCODE: "{{vault_catlendar_passcode}}"
+      AUTH_SECRET: "{{vault_catlendar_auth_secret}}"
+
+  - name: monitoring
+    type: node
+    path: /home/lucas/apps/monitoring
+    subdomain: monitor.bylucas.eu
+    port: 3005
+    basic_auth: true
+    basic_auth_user: lucas
+    basic_auth_password: "{{ vault_monitoring_password }}"
+    proxy_timeout: 3600
+    env_vars:
+      PORT: "3005"
+      CERTBOT_EMAIL: "{{ certbot_email }}"
+
+# certbot_email (email Let's Encrypt pour les alertes d'expiration de certificat)
+# est défini dans group_vars/all/private.yml, non versionné.
+# Voir group_vars/all/private.yml.example.
+
+# Comptes PostgreSQL applicatifs, un par projet ayant besoin d'une BDD.
+# Vide au départ, pour la même raison. Les mots de passe ne doivent JAMAIS
+# être en clair ici - utilise ansible-vault (voir README) une fois qu'un
+# vrai projet a besoin d'une base.
+#
+# Exemple de structure attendue :
+# postgresql_app_users:
+#   - name: projet1_user
+#     password: "{{ vault_projet1_db_password }}"
+#     db: projet1_db
+
+postgresql_app_users: 
+  - name: catlendar
+    password: "{{vault_catlendar_password}}"
+    db: catlendar
+
+infra_services:
+  - nginx
+  - postgresql
+  - fail2ban
+  - docker
+
+docker_containers:
+  - warp10
+  - homestead

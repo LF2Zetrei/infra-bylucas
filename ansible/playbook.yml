@@ -1,0 +1,20 @@
+---
+# Playbook principal - configure le VPS de zéro, dans l'ordre exact de la liste :
+# SSH -> Firewall -> Mises à jour auto -> Fail2ban -> Nginx -> Durcissement -> PostgreSQL -> Process manager
+
+- name: Configuration complète du VPS
+  hosts: vps
+  become: true
+
+  roles:
+    - ssh-hardening
+    - firewall
+    - unattended-upgrades
+    - fail2ban
+    - nginx
+    - postgresql
+    - swap
+    - docker
+    - warp10
+    - minecraft-homestead
+    - app-deploy

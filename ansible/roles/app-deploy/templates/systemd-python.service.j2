@@ -1,0 +1,15 @@
+[Unit]
+Description={{ item.name }} (Python)
+After=network.target
+
+[Service]
+Type=simple
+User={{ ssh_user }}
+WorkingDirectory={{ item.path }}
+EnvironmentFile={{ item.path }}/.env
+ExecStart={{ item.path }}/venv/bin/python3 {{ item.entrypoint | default('app.py') }}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,63 @@
+---
+# Étapes 8 et 9 de la liste : Reverse proxy Nginx + Durcissement
+
+- name: Installer Nginx et Certbot
+  ansible.builtin.apt:
+    name:
+      - nginx
+      - certbot
+      - python3-certbot-nginx
+    state: present
+    update_cache: true
+
+- name: Déployer le bloc catch-all (rejette les Host inconnus)
+  ansible.builtin.template:
+    src: default-catchall.j2
+    dest: /etc/nginx/sites-available/00-default-catchall
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger nginx
+
+- name: Activer le bloc catch-all
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/00-default-catchall
+    dest: /etc/nginx/sites-enabled/00-default-catchall
+    state: link
+  notify: Recharger nginx
+
+- name: Déployer les headers de sécurité communs (inclus par chaque site)
+  ansible.builtin.template:
+    src: security-headers.conf.j2
+    dest: /etc/nginx/snippets/security-headers.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger nginx
+
+- name: Déployer la zone de rate limiting globale
+  ansible.builtin.template:
+    src: rate-limit.conf.j2
+    dest: /etc/nginx/conf.d/rate-limit.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger nginx
+
+- name: S'assurer que le site par défaut nginx est désactivé
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+  notify: Recharger nginx
+
+- name: S'assurer que Nginx tourne au démarrage
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: S'assurer que le renouvellement automatique des certificats est actif
+  ansible.builtin.systemd:
+    name: certbot.timer
+    state: started
+    enabled: true

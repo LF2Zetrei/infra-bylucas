@@ -1,0 +1,7 @@
+# Copier en inventory.yml et remplir. inventory.yml n'est jamais versionné.
+all:
+  hosts:
+    vps:
+      ansible_host: "203.0.113.10"      # IP publique du VPS
+      ansible_user: lucas               # utilisateur non-root créé manuellement au premier accès
+      ansible_ssh_private_key_file: ~/.ssh/bylucas

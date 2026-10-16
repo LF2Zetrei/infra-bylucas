@@ -1,0 +1,4 @@
+---
+fail2ban_maxretry: 5
+fail2ban_bantime: 3600    # secondes, 1h
+fail2ban_findtime: 600    # secondes, 10 min

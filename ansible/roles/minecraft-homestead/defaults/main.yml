@@ -1,0 +1,14 @@
+---
+# Démarre prudent (4 Go) plutôt que les 6 Go recommandés par la doc du
+# modpack - sur ce VPS partagé avec tous tes autres services, 6 Go de heap
+# JVM (+ overhead réel ~7-7,5 Go) ne laisserait presque rien pour le reste.
+# Augmente prudemment en surveillant la RAM via /monitoring après quelques
+# sessions de jeu réelles.
+minecraft_heap: "4G"
+
+# Slug CurseForge du modpack (dernière partie de son URL)
+minecraft_cf_slug: "homestead-cozy"
+
+# Fige une version précise pour que tous les joueurs aient exactement la
+# même que le serveur. Trouve l'ID dans l'URL du fichier, onglet "Files".
+# minecraft_cf_file_id: "123456"

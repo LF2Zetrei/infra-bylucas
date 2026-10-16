@@ -1,0 +1,8 @@
+# Rejette toute requête dont le Host ne matche aucun server_name explicite
+# Empêche l'exposition accidentelle d'un projet via un sous-domaine "deviné"
+
+server {
+    listen 80 default_server;
+    server_name _;
+    return 444;
+}

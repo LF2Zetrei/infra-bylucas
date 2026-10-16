@@ -1,0 +1,39 @@
+---
+# Étape 3 de la liste : SSH
+# Prérequis : l'utilisateur non-root et sa clé publique doivent déjà exister
+# avant de lancer ce rôle (le tout premier accès au VPS se fait encore par
+# mot de passe root, une seule fois, pour créer cet utilisateur).
+
+- name: Créer l'utilisateur non-root
+  ansible.builtin.user:
+    name: "{{ ssh_user }}"
+    groups: sudo
+    shell: /bin/bash
+    create_home: true
+
+- name: Déployer la clé publique SSH de l'utilisateur
+  ansible.posix.authorized_key:
+    user: "{{ ssh_user }}"
+    key: "{{ lookup('file', ssh_public_key_path) }}"
+    state: present
+
+- name: Désactiver le login root en SSH
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PermitRootLogin'
+    line: 'PermitRootLogin no'
+  notify: Redémarrer sshd
+
+- name: Désactiver l'authentification par mot de passe
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PasswordAuthentication'
+    line: 'PasswordAuthentication no'
+  notify: Redémarrer sshd
+
+- name: Désactiver l'authentification par mot de passe vide
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PermitEmptyPasswords'
+    line: 'PermitEmptyPasswords no'
+  notify: Redémarrer sshd

@@ -1,0 +1,9 @@
+---
+# 1 Go de heap max : suffisant pour un usage perso/données de capteurs, et
+# laisse largement de la marge sur les 7.6 Go du VPS (nginx, postgres,
+# fail2ban consomment très peu). Augmente si tu stockes de gros volumes.
+warp10_heap: "1g"
+
+# Toujours fixer une version précise (jamais "latest") pour un comportement
+# reproductible entre deux "ansible-playbook".
+warp10_version: "2.11.1-ng-2-ubuntu"

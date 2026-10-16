@@ -1,0 +1,67 @@
+---
+# Étape 10 de la liste : Base de données
+
+- name: Installer PostgreSQL
+  ansible.builtin.apt:
+    name:
+      - postgresql
+      - python3-psycopg2
+    state: present
+    update_cache: true
+
+- name: Détecter le dossier de config PostgreSQL réellement installé
+  ansible.builtin.find:
+    paths: /etc/postgresql
+    file_type: directory
+  register: pg_config_dirs
+
+- name: Déterminer le chemin du fichier postgresql.conf
+  ansible.builtin.set_fact:
+    pg_conf_path: "{{ (pg_config_dirs.files | sort(attribute='path'))[-1].path }}/main/postgresql.conf"
+
+- name: S'assurer que PostgreSQL n'écoute que sur localhost
+  ansible.builtin.lineinfile:
+    path: "{{ pg_conf_path }}"
+    regexp: '^#?listen_addresses'
+    line: "listen_addresses = 'localhost'"
+  notify: Redémarrer postgresql
+
+- name: S'assurer que le service tourne au démarrage
+  ansible.builtin.service:
+    name: postgresql
+    state: started
+    enabled: true
+
+- name: Créer les rôles applicatifs (un par projet ayant une BDD)
+  become: true
+  become_user: postgres
+  community.postgresql.postgresql_user:
+    name: "{{ item.name }}"
+    password: "{{ item.password }}"
+    state: present
+  loop: "{{ postgresql_app_users }}"
+  no_log: true
+
+- name: Créer les bases applicatives
+  become: true
+  become_user: postgres
+  community.postgresql.postgresql_db:
+    name: "{{ item.db }}"
+    owner: "{{ item.name }}"
+    state: present
+  loop: "{{ postgresql_app_users }}"
+
+- name: Déployer le script de sauvegarde quotidien
+  ansible.builtin.template:
+    src: pg_backup.sh.j2
+    dest: /usr/local/bin/pg_backup.sh
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Planifier la sauvegarde quotidienne via cron
+  ansible.builtin.cron:
+    name: "Sauvegarde PostgreSQL quotidienne"
+    hour: "3"
+    minute: "0"
+    job: "/usr/local/bin/pg_backup.sh"

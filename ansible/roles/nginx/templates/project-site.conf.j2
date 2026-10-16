@@ -1,0 +1,29 @@
+# Config générée pour le projet : {{ item.name }}
+# Type : {{ item.type }}
+
+server {
+    listen 80;
+    server_name {{ item.subdomain }};
+
+        location / {
+        include /etc/nginx/snippets/security-headers.conf;
+        limit_req zone=global_limit burst=20 nodelay;
+{% if item.basic_auth | default(false) %}
+
+        # Protection par mot de passe - projet non destiné au grand public
+        auth_basic "Accès restreint";
+        auth_basic_user_file /etc/nginx/.htpasswd_{{ item.name }};
+{% endif %}
+
+        proxy_pass http://localhost:{{ item.port }};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Timeout allongé pour les traitements longs (ex: inférence LLM).
+        # Sans risque pour les apps rapides classiques.
+        proxy_read_timeout {{ item.proxy_timeout | default(60) }}s;
+        proxy_send_timeout {{ item.proxy_timeout | default(60) }}s;
+    }
+}

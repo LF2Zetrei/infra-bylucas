@@ -1,0 +1,9 @@
+---
+# Liste des noms de projets à traiter lors de ce run.
+# Vide = tous les projets déclarés dans "projects" (comportement normal).
+# Non vide = UNIQUEMENT ces projets-là, pour ajouter/modifier un projet
+# sans repasser sur ceux déjà en place :
+#
+#   ansible-playbook -i inventory.yml playbook.yml --ask-vault-pass \
+#     -e '{"target_projects": ["entry-generator"]}'
+target_projects: []

@@ -1,0 +1,8 @@
+*.retry
+
+# Secrets et données propres au serveur - jamais versionnés.
+# Des modèles *.example sont versionnés à côté.
+vault_pass.txt
+inventory.yml
+group_vars/all/vault.yml
+group_vars/all/private.yml

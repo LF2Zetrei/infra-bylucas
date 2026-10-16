@@ -1,0 +1,23 @@
+---
+# Étape 6 de la liste : Fail2ban
+
+- name: Installer Fail2ban
+  ansible.builtin.apt:
+    name: fail2ban
+    state: present
+    update_cache: true
+
+- name: Déployer la config locale (jail SSH)
+  ansible.builtin.template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Redémarrer fail2ban
+
+- name: S'assurer que le service tourne au démarrage
+  ansible.builtin.service:
+    name: fail2ban
+    state: started
+    enabled: true

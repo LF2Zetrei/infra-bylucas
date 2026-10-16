@@ -1,0 +1,2 @@
+---
+nginx_rate_limit_rps: 10

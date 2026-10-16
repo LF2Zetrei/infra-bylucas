@@ -1,0 +1,57 @@
+---
+# Rôle partagé : Ollama (moteur d'inférence LLM local)
+# Comme PostgreSQL, c'est un service PARTAGÉ (une seule instance sur le VPS),
+# pas un projet par-projet. Les apps qui en ont besoin s'y connectent en
+# localhost:11434, jamais exposé à l'extérieur.
+
+- name: Vérifier si Ollama est déjà installé
+  ansible.builtin.command: which ollama
+  register: ollama_check
+  changed_when: false
+  failed_when: false
+
+- name: Installer Ollama (script officiel)
+  ansible.builtin.shell: curl -fsSL https://ollama.com/install.sh | sh
+  when: ollama_check.rc != 0
+
+- name: Créer le dossier d'override systemd pour Ollama
+  ansible.builtin.file:
+    path: /etc/systemd/system/ollama.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Déployer l'override systemd (limite à 1 modèle chargé en RAM à la fois)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ollama.service.d/override.conf
+    content: |
+      [Service]
+      Environment="OLLAMA_MAX_LOADED_MODELS=1"
+      Environment="OLLAMA_NUM_PARALLEL=1"
+      # Décharge un modèle inactif après 5 min, libère la RAM entre deux usages
+      Environment="OLLAMA_KEEP_ALIVE=5m"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Recharger et redémarrer ollama
+
+- name: S'assurer qu'Ollama écoute uniquement en local (jamais exposé publiquement)
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/system/ollama.service.d/override.conf
+    line: '      Environment="OLLAMA_HOST=127.0.0.1:11434"'
+    insertafter: '\[Service\]'
+  notify: Recharger et redémarrer ollama
+
+- name: S'assurer qu'Ollama tourne au démarrage
+  ansible.builtin.systemd:
+    name: ollama
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Télécharger les modèles nécessaires (peut prendre plusieurs minutes la 1ère fois)
+  ansible.builtin.command: "ollama pull {{ item }}"
+  loop: "{{ ollama_models }}"
+  register: ollama_pull
+  changed_when: "'success' in ollama_pull.stdout or 'up to date' not in ollama_pull.stderr"
