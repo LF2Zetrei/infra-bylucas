@@ -410,8 +410,12 @@ changed from the monitoring dashboard (Minecraft panel).
   it's no longer passed on an Ansible command line.
 - `/usr/local/sbin/minecraft-ctl` (root, 0750, from `minecraft-ctl.j2`): the
   **only** root entry point of the panel. Fixed subcommands, no free
-  arguments; values read from `config.json` (untrusted, written by the app)
-  are re-validated by regex.
+  arguments; values read from `config.json` and `request.json` (untrusted,
+  written by the app) are re-validated by regex. Error messages (stderr) are
+  in English because the panel shows them as-is. A `flock` on
+  `/run/minecraft-ctl.lock` allows one operation at a time (except
+  `list-backups`): a second one fails with "another Minecraft operation is
+  already running".
 
   | Subcommand | What it does |
   |---|---|
@@ -421,11 +425,24 @@ changed from the monitoring dashboard (Minecraft panel).
   | `create` | Creates the container only if it doesn't exist (used by Ansible) |
   | `export-world` | Streams a zip of the world to stdout (`save-off` + `save-all flush` via RCON during the copy) |
   | `import-world` | Validates `/var/minecraft-uploads/incoming.zip` (valid zip, no `..`/absolute paths, contains `level.dat`, ≤ 8 GB unzipped), stops the server, backs up the old world, swaps it in, `chown 1000:1000`, starts the server |
+  | `new-world` | Stops, backs up and deletes the world, empties `level-seed` in `server.properties`, starts → new world with a random seed, same modpack |
+  | `save-world` | Manual hot backup (`save-off` + `save-all flush` during the copy) |
+  | `list-backups` | Prints every backup as JSON (`id`, `slug`, `fileId`, `reason`, `createdAt`, `size`), newest first |
+  | `restore-world` | Restores the backup named in `/var/lib/minecraft-panel/request.json` (`{"id": "<slug>/<stamp>"}`): extracts it, stops, backs up the current world, swaps it in. If the backup's modpack differs from the container's, also writes it to `config.json`, cleans the mods and recreates the container |
+  | `delete-backup` | Deletes the backup named in `request.json` |
 
-  World backups: `/var/minecraft-backups/world-<date>.tar.gz`, **5 kept**.
+  World backups, **grouped by modpack**:
+  `/var/minecraft-backups/<slug>/<YYYYMMDD-HHMMSS>.tar.gz` + a `.json` with
+  `{slug, fileId, reason, createdAt}`. The slug is the one of the container
+  the world was played with (`CF_SLUG`), so a backup taken during a modpack
+  change goes under the old modpack. A backup is made automatically before
+  every world replacement (`before-import`, `before-new-world`,
+  `before-modpack-change`, `before-restore`): the **5 most recent automatic
+  backups are kept per modpack**. Manual backups (`manual`) are never deleted
+  automatically.
 - `/etc/sudoers.d/minecraft-panel` (from `minecraft-sudoers.j2`, validated
   with `visudo -cf`): `lucas` may run exactly
-  `minecraft-ctl start|stop|restart|apply|apply-clean|export-world|import-world`
+  `minecraft-ctl start|stop|restart|apply|apply-clean|export-world|import-world|new-world|save-world|list-backups|restore-world|delete-backup`
   without a password (no wildcard, `create` excluded).
 - Container: `minecraft-ctl create` → `itzg/minecraft-server:java17` with
   `TYPE=AUTO_CURSEFORGE`, `CF_SLUG` (+ `CF_FILE_ID`) from `config.json`,
@@ -604,8 +621,9 @@ role (see §4.10).
 /var/warp10-data/                          # Warp10 data
 /var/minecraft-homestead-data/             # Minecraft world, mods, server.properties
 /var/lib/minecraft-panel/config.json       # current modpack (written by the panel)
+/var/lib/minecraft-panel/request.json      # backup targeted by restore/delete (written by the panel)
 /var/minecraft-uploads/                    # uploaded world zip before import
-/var/minecraft-backups/                    # world backups (5 kept)
+/var/minecraft-backups/<slug>/             # world backups per modpack (5 automatic kept + manual ones)
 /swapfile                                  # 4 GB
 ```
 

@@ -2,47 +2,131 @@
 # Généré par Ansible - ne pas éditer à la main.
 # Seul point d'entrée root du panneau Minecraft. Appelé via sudo avec des
 # sous-commandes FIXES (aucun argument libre) : voir minecraft-sudoers.j2.
+# Les messages d'erreur (stderr) sont affichés tels quels dans le panneau,
+# d'où l'anglais.
 set -euo pipefail
 
 NAME=homestead
 DATA=/var/minecraft-homestead-data
-CONFIG=/var/lib/minecraft-panel/config.json     # écrit par l'appli (non fiable) -> validé ici
+STATE=/var/lib/minecraft-panel
+CONFIG=$STATE/config.json       # écrit par l'appli (non fiable) -> validé ici
+REQUEST=$STATE/request.json     # sauvegarde visée par restore/delete (non fiable)
 UPLOAD=/var/minecraft-uploads/incoming.zip
-BACKUPS=/var/minecraft-backups
+BACKUPS=/var/minecraft-backups  # <slug>/<AAAAMMJJ-HHMMSS>.tar.gz + .json
 CF_KEY_FILE=/etc/minecraft/cf_api_key
 HEAP="{{ minecraft_heap }}"
 IMAGE="itzg/minecraft-server:java17"
 MAX_UNZIPPED_MB=8192
+KEEP_AUTO=5                     # sauvegardes automatiques gardées par modpack
+
+SLUG_RE='^[a-z0-9][a-z0-9-]{0,79}$'
+FILE_ID_RE='^[0-9]{1,10}$'
+STAMP_RE='^[0-9]{8}-[0-9]{6}$'
+
+die() { echo "$*" >&2; exit 1; }
 
 level_name() {
   local l
   l=$(grep -E '^level-name=' "$DATA/server.properties" 2>/dev/null | head -1 | cut -d= -f2- || true)
   l=${l:-world}
   # nom de dossier sûr uniquement
-  [[ "$l" =~ ^[A-Za-z0-9._\ ()-]+$ && "$l" != *..* ]] || { echo "level-name invalide" >&2; exit 1; }
+  [[ "$l" =~ ^[A-Za-z0-9._\ ()-]+$ && "$l" != *..* ]] || die "invalid level-name in server.properties"
   echo "$l"
 }
 
+container_env() {
+  docker inspect -f '{{ '{{range .Config.Env}}{{println .}}{{end}}' }}' "$NAME" 2>/dev/null \
+    | sed -n "s/^$1=//p" | head -1 || true
+}
+
+# Modpack avec lequel le monde actuel a été joué : celui du conteneur (même
+# arrêté), sinon celui de la config.
+current_slug() {
+  local s; s=$(container_env CF_SLUG)
+  [ -n "$s" ] || s=$(jq -r '.slug // empty' "$CONFIG" 2>/dev/null || true)
+  [[ "$s" =~ $SLUG_RE ]] && echo "$s" || echo unknown
+}
+
+current_file_id() {
+  local f; f=$(container_env CF_FILE_ID)
+  [[ "$f" =~ $FILE_ID_RE ]] && echo "$f" || echo ""
+}
+
+# backup_world <reason> : archive le monde dans $BACKUPS/<slug>/.
+# Le serveur doit être arrêté, ou les sauvegardes auto suspendues (save-off).
 backup_world() {
-  mkdir -p "$BACKUPS"; chmod 700 "$BACKUPS"
-  local lvl; lvl=$(level_name)
+  local reason=$1 lvl slug stamp dir
+  lvl=$(level_name)
   [ -d "$DATA/$lvl" ] || return 0
-  tar -czf "$BACKUPS/world-$(date +%Y%m%d-%H%M%S).tar.gz" -C "$DATA" "$lvl"
-  # garde les 5 plus récentes
-  ls -1t "$BACKUPS"/world-*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f --
+  slug=$(current_slug)
+  stamp=$(date +%Y%m%d-%H%M%S)
+  dir=$BACKUPS/$slug
+  mkdir -p "$dir"; chmod 700 "$BACKUPS" "$dir"
+  tar -czf "$dir/$stamp.tar.gz" -C "$DATA" "$lvl"
+  jq -n --arg slug "$slug" --arg fileId "$(current_file_id)" --arg reason "$reason" \
+        --arg createdAt "$(date -Iseconds)" \
+        '{slug: $slug, fileId: $fileId, reason: $reason, createdAt: $createdAt}' > "$dir/$stamp.json"
+  prune_auto "$dir"
+}
+
+# Garde les $KEEP_AUTO sauvegardes automatiques les plus récentes du dossier ;
+# les sauvegardes manuelles ne sont jamais supprimées automatiquement.
+prune_auto() {
+  local dir=$1 m n=0
+  for m in $(ls -1r "$dir"/*.json 2>/dev/null); do
+    [ "$(jq -r .reason "$m")" = manual ] && continue
+    n=$((n + 1))
+    [ "$n" -gt "$KEEP_AUTO" ] && rm -f -- "$m" "${m%.json}.tar.gz"
+  done
+  return 0
+}
+
+# Lit et valide $REQUEST ({"id": "<slug>/<stamp>"}) ; renseigne REQ_DIR et REQ_STAMP.
+read_request() {
+  local id slug stamp
+  id=$(jq -r '.id // empty' "$REQUEST" 2>/dev/null || true)
+  slug=${id%%/*}; stamp=${id#*/}
+  [[ "$id" == */* && ( "$slug" =~ $SLUG_RE || "$slug" == unknown ) && "$stamp" =~ $STAMP_RE ]] \
+    || die "invalid backup id"
+  REQ_DIR=$BACKUPS/$slug; REQ_STAMP=$stamp
+  [ -f "$REQ_DIR/$REQ_STAMP.tar.gz" ] || die "backup not found"
+}
+
+# Pendant une copie à chaud : suspend les sauvegardes auto du serveur et force
+# l'écriture du monde ; save-on est rétabli à la sortie du script.
+pause_saving() {
+  if docker exec "$NAME" rcon-cli save-off >/dev/null 2>&1; then
+    trap 'docker exec "$NAME" rcon-cli save-on >/dev/null 2>&1 || true' EXIT
+    docker exec "$NAME" rcon-cli save-all flush >/dev/null 2>&1 || true
+  fi
+}
+
+clean_mods() {
+  rm -rf -- "$DATA/mods" "$DATA/config" "$DATA/.curseforge" "$DATA"/.curseforge-* 2>/dev/null || true
 }
 
 run_container() {
   local slug file_id
   slug=$(jq -r '.slug // empty' "$CONFIG"); file_id=$(jq -r '.fileId // empty' "$CONFIG")
-  [[ "$slug" =~ ^[a-z0-9][a-z0-9-]{0,79}$ ]] || { echo "slug invalide" >&2; exit 1; }
-  [[ -z "$file_id" || "$file_id" =~ ^[0-9]{1,10}$ ]] || { echo "fileId invalide" >&2; exit 1; }
+  [[ "$slug" =~ $SLUG_RE ]] || die "invalid modpack slug"
+  [[ -z "$file_id" || "$file_id" =~ $FILE_ID_RE ]] || die "invalid file ID"
   local args=(run -d --name "$NAME" --restart unless-stopped -p 25565:25565
     -e EULA=TRUE -e TYPE=AUTO_CURSEFORGE -e "CF_API_KEY=$(cat "$CF_KEY_FILE")"
     -e "CF_SLUG=$slug" -e "MEMORY=$HEAP" -v "$DATA:/data")
   [ -n "$file_id" ] && args+=(-e "CF_FILE_ID=$file_id")
   docker "${args[@]}" "$IMAGE" >/dev/null
 }
+
+recreate_container() {
+  docker rm "$NAME" 2>/dev/null || true
+  run_container
+}
+
+# Une seule opération à la fois (double clic, deux onglets...).
+if [ "${1:-}" != list-backups ]; then
+  exec 9>/run/minecraft-ctl.lock
+  flock -n 9 || die "another Minecraft operation is already running"
+fi
 
 case "${1:-}" in
   start)   docker start "$NAME" ;;
@@ -53,11 +137,10 @@ case "${1:-}" in
     # Recrée le conteneur avec le modpack de $CONFIG. Le volume (monde) est conservé.
     docker stop -t 60 "$NAME" 2>/dev/null || true
     if [ "$1" = apply-clean ]; then
-      backup_world
-      rm -rf -- "$DATA/mods" "$DATA/config" "$DATA/.curseforge" "$DATA"/.curseforge-* 2>/dev/null || true
+      backup_world before-modpack-change
+      clean_mods
     fi
-    docker rm "$NAME" 2>/dev/null || true
-    run_container ;;
+    recreate_container ;;
 
   create)  # utilisé par Ansible au premier déploiement
     docker inspect "$NAME" >/dev/null 2>&1 || run_container ;;
@@ -66,32 +149,84 @@ case "${1:-}" in
     # Zip en flux sur stdout (jamais de fichier temporaire de la taille du monde).
     lvl=$(level_name)
     cd "$DATA"
-    if docker exec "$NAME" rcon-cli save-off >/dev/null 2>&1; then
-      trap 'docker exec "$NAME" rcon-cli save-on >/dev/null 2>&1 || true' EXIT
-      docker exec "$NAME" rcon-cli save-all flush >/dev/null 2>&1 || true
-    fi
+    pause_saving
     zip -q -r - "$lvl" ;;
 
   import-world)
-    [ -f "$UPLOAD" ] || { echo "aucun fichier envoyé" >&2; exit 1; }
+    [ -f "$UPLOAD" ] || die "no uploaded file"
     lvl=$(level_name)
     # Validation : zip valide, pas de chemin dangereux, level.dat présent, taille raisonnable
-    unzip -tqq "$UPLOAD" >/dev/null || { echo "zip invalide" >&2; exit 1; }
-    if unzip -Z1 "$UPLOAD" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then echo "chemins dangereux" >&2; exit 1; fi
+    unzip -tqq "$UPLOAD" >/dev/null || die "invalid zip file"
+    if unzip -Z1 "$UPLOAD" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then die "zip contains unsafe paths"; fi
     ldat=$(unzip -Z1 "$UPLOAD" | grep -E '(^|/)level\.dat$' | awk -F/ '{print NF-1" "$0}' | sort -n | head -1 | cut -d' ' -f2-)
-    [ -n "$ldat" ] || { echo "level.dat introuvable : ce n'est pas un monde Minecraft" >&2; exit 1; }
+    [ -n "$ldat" ] || die "level.dat not found: this is not a Minecraft world"
     total=$(unzip -Zt "$UPLOAD" | awk '{print int($3/1048576)}')
-    [ "${total:-0}" -le "$MAX_UNZIPPED_MB" ] || { echo "monde trop gros" >&2; exit 1; }
+    [ "${total:-0}" -le "$MAX_UNZIPPED_MB" ] || die "world is too big (max ${MAX_UNZIPPED_MB} MB unzipped)"
     prefix=${ldat%level.dat}           # "" ou "Mon Monde/"
     tmp=$(mktemp -d "$DATA/.import.XXXXXX")
     unzip -q "$UPLOAD" -d "$tmp"
     docker stop -t 60 "$NAME" 2>/dev/null || true
-    backup_world
+    backup_world before-import
     rm -rf -- "${DATA:?}/$lvl"
     mv -- "$tmp/${prefix%/}" "$DATA/$lvl" 2>/dev/null || { mkdir -p "$DATA/$lvl"; cp -a "$tmp/." "$DATA/$lvl/"; }
     rm -rf -- "$tmp" "$UPLOAD"
     chown -R 1000:1000 "$DATA/$lvl"
     docker start "$NAME" >/dev/null ;;
 
-  *) echo "usage: minecraft-ctl start|stop|restart|apply|apply-clean|create|export-world|import-world" >&2; exit 2 ;;
+  new-world)
+    # Le serveur régénère un monde au démarrage si le dossier n'existe plus ;
+    # level-seed vidé = graine aléatoire.
+    lvl=$(level_name)
+    docker stop -t 60 "$NAME" 2>/dev/null || true
+    backup_world before-new-world
+    rm -rf -- "${DATA:?}/$lvl"
+    sed -i 's/^level-seed=.*/level-seed=/' "$DATA/server.properties"
+    docker start "$NAME" >/dev/null ;;
+
+  save-world)
+    pause_saving
+    backup_world manual ;;
+
+  list-backups)
+    # JSON sur stdout, du plus récent au plus ancien.
+    for m in "$BACKUPS"/*/*.json; do
+      [ -f "$m" ] || continue
+      t=${m%.json}.tar.gz; [ -f "$t" ] || continue
+      d=${m%/*}
+      jq -c --arg id "${d##*/}/$(basename "$m" .json)" --argjson size "$(stat -c %s "$t")" \
+        '. + {id: $id, size: $size}' "$m"
+    done | jq -s 'sort_by(.createdAt) | reverse' ;;
+
+  restore-world)
+    read_request
+    meta=$REQ_DIR/$REQ_STAMP.json
+    target_slug=$(jq -r '.slug // empty' "$meta"); target_file_id=$(jq -r '.fileId // empty' "$meta")
+    lvl=$(level_name)
+    tmp=$(mktemp -d "$DATA/.restore.XXXXXX")
+    tar -xzf "$REQ_DIR/$REQ_STAMP.tar.gz" -C "$tmp"
+    src=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)
+    [ -n "$src" ] && [ -f "$src/level.dat" ] || { rm -rf -- "$tmp"; die "backup does not contain a world"; }
+    docker stop -t 60 "$NAME" 2>/dev/null || true
+    backup_world before-restore
+    rm -rf -- "${DATA:?}/$lvl"
+    mv -- "$src" "$DATA/$lvl"
+    rm -rf -- "$tmp" "$REQUEST"
+    chown -R 1000:1000 "$DATA/$lvl"
+    # Monde d'un autre modpack : on bascule aussi le serveur sur ce modpack,
+    # sinon les blocs/objets des mods manquants seraient perdus.
+    if [[ "$target_slug" =~ $SLUG_RE && "$target_slug" != "$(current_slug)" ]]; then
+      jq -n --arg slug "$target_slug" --arg fileId "$target_file_id" '{slug: $slug, fileId: $fileId}' > "$CONFIG.tmp"
+      cat "$CONFIG.tmp" > "$CONFIG"; rm -f -- "$CONFIG.tmp"   # garde propriétaire et droits
+      clean_mods
+      recreate_container
+    else
+      docker start "$NAME" >/dev/null
+    fi ;;
+
+  delete-backup)
+    read_request
+    rm -f -- "$REQ_DIR/$REQ_STAMP.tar.gz" "$REQ_DIR/$REQ_STAMP.json" "$REQUEST"
+    rmdir "$REQ_DIR" 2>/dev/null || true ;;
+
+  *) die "usage: minecraft-ctl start|stop|restart|apply|apply-clean|create|export-world|import-world|new-world|save-world|list-backups|restore-world|delete-backup" ;;
 esac
