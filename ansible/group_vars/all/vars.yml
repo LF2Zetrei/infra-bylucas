@@ -101,6 +101,7 @@ projects:
     basic_auth_user: lucas
     basic_auth_password: "{{ vault_monitoring_password }}"
     proxy_timeout: 3600
+    large_transfers: true
     env_vars:
       PORT: "3005"
       CERTBOT_EMAIL: "{{ certbot_email }}"

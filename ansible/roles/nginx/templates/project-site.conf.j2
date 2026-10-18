@@ -5,7 +5,7 @@ server {
     listen 80;
     server_name {{ item.subdomain }};
 
-        location / {
+    location / {
         include /etc/nginx/snippets/security-headers.conf;
         limit_req zone=global_limit burst=20 nodelay;
 {% if item.basic_auth | default(false) %}
@@ -25,5 +25,14 @@ server {
         # Sans risque pour les apps rapides classiques.
         proxy_read_timeout {{ item.proxy_timeout | default(60) }}s;
         proxy_send_timeout {{ item.proxy_timeout | default(60) }}s;
+{% if item.large_transfers | default(false) %}
+
+        # Envoi/téléchargement de gros fichiers (ex: monde Minecraft) en flux,
+        # sans tampon disque nginx.
+        client_max_body_size 4g;
+        proxy_request_buffering off;
+        proxy_buffering off;
+{% endif %}
     }
 }
+

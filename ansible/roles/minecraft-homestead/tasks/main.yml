@@ -1,38 +1,68 @@
 ---
-# Serveur Minecraft "Homestead" (modpack CurseForge, Fabric 1.20.1), via
-# l'image itzg/minecraft-server. Suppose que le rôle "docker" a déjà tourné
-# (Docker Engine installé) - pas de duplication ici.
-#
-# Contrairement à tous tes autres projets, ce service est exposé DIRECTEMENT
-# au public (port TCP brut 25565, pas de HTTP, donc pas de nginx/HTTPS
-# possible) - c'est le seul port de ce type ouvert sur le VPS.
+# Serveur Minecraft "Homestead" (modpack CurseForge) via itzg/minecraft-server.
+# Le conteneur est désormais créé par /usr/local/sbin/minecraft-ctl, qui lit
+# le modpack dans /var/lib/minecraft-panel/config.json : le panneau de
+# monitoring peut donc changer de modpack sans toucher à Ansible.
+# Port 25565 exposé directement (TCP brut, pas de nginx).
+
+- name: Installer les outils nécessaires au panneau (zip, unzip, jq)
+  ansible.builtin.apt:
+    name: [zip, unzip, jq]
+    state: present
 
 - name: Créer le dossier de données persistantes Minecraft
+  ansible.builtin.file: { path: /var/minecraft-homestead-data, state: directory, mode: "0755" }
+
+- name: Dossiers du panneau (config modifiable par l'appli, uploads)
   ansible.builtin.file:
-    path: /var/minecraft-homestead-data
+    path: "{{ item }}"
     state: directory
-    mode: "0755"
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0700"
+  loop: [/var/lib/minecraft-panel, /var/minecraft-uploads]
 
-- name: Vérifier si le conteneur Minecraft existe déjà
-  ansible.builtin.command: docker ps -a --filter "name=homestead" --format "{{ '{{.Names}}' }}"
-  register: homestead_container_check
+- name: Dossier root pour la clé CurseForge
+  ansible.builtin.file: { path: /etc/minecraft, state: directory, owner: root, group: root, mode: "0700" }
+
+- name: Clé API CurseForge (lisible par root uniquement)
+  ansible.builtin.copy:
+    dest: /etc/minecraft/cf_api_key
+    content: "{{ vault_curseforge_api_key }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Config modpack initiale (n'écrase jamais ce que le panneau a modifié)
+  ansible.builtin.copy:
+    dest: /var/lib/minecraft-panel/config.json
+    content: "{{ {'slug': minecraft_cf_slug, 'fileId': (minecraft_cf_file_id | default('') | string)} | to_nice_json }}"
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0600"
+    force: false
+
+- name: Installer minecraft-ctl
+  ansible.builtin.template:
+    src: minecraft-ctl.j2
+    dest: /usr/local/sbin/minecraft-ctl
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Droits sudo du panneau (sous-commandes exactes)
+  ansible.builtin.template:
+    src: minecraft-sudoers.j2
+    dest: /etc/sudoers.d/minecraft-panel
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+
+- name: Créer le conteneur s'il n'existe pas encore
+  ansible.builtin.command: /usr/local/sbin/minecraft-ctl create
   changed_when: false
-
-- name: Lancer le conteneur Minecraft (RAM plafonnée, exposé publiquement sur 25565)
-  ansible.builtin.command: >
-    docker run -d
-    --name homestead
-    --restart unless-stopped
-    -p 25565:25565
-    -e EULA=TRUE
-    -e TYPE=AUTO_CURSEFORGE
-    -e CF_API_KEY={{ vault_curseforge_api_key }}
-    -e CF_SLUG={{ minecraft_cf_slug }}
-    {% if minecraft_cf_file_id is defined %}-e CF_FILE_ID={{ minecraft_cf_file_id }}{% endif %}
-    -e MEMORY={{ minecraft_heap }}
-    -v /var/minecraft-homestead-data:/data
-    itzg/minecraft-server:java17
-  when: "'homestead' not in homestead_container_check.stdout"
 
 - name: S'assurer que le conteneur démarre au boot
   ansible.builtin.command: docker update --restart unless-stopped homestead

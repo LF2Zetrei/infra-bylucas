@@ -64,7 +64,7 @@ ansible/
     ├── swap/                   # 4 GB swap file
     ├── docker/                 # Docker Engine (official repository)
     ├── warp10/                 # Warp10 container (time series), localhost only
-    ├── minecraft-homestead/    # Minecraft server container (public port 25565)
+    ├── minecraft-homestead/    # Minecraft server container (public port 25565) + panel script/sudoers
     ├── app-deploy/             # Per-project systemd services + nginx + TLS
     └── ollama/                 # (NOT called by the playbook at the moment, see §11)
 ```
@@ -167,6 +167,7 @@ Each entry describes one project. Recognised fields:
 | `basic_auth_user` | no | — | Default `lucas`. |
 | `basic_auth_password` | if basic_auth | — | Always via the vault: `"{{ vault_xxx_password }}"`. |
 | `proxy_timeout` | no | non-static | nginx timeout in seconds (default 60). Raise it for long-running requests. |
+| `large_transfers` | no | non-static | `true` = stream big uploads/downloads through nginx: `client_max_body_size 4g`, `proxy_request_buffering off`, `proxy_buffering off`. Used by `monitoring` (Minecraft world upload/download). |
 
 Currently declared projects:
 
@@ -178,7 +179,7 @@ Currently declared projects:
 | `front-component` | node | front-component.bylucas.eu | 3002 | |
 | `catTree` | node | catTree.bylucas.eu | 3003 | |
 | `catlendar` | node | catlendar.bylucas.eu | 3004 | PostgreSQL DB `catlendar`, secrets from the vault |
-| `monitoring` | node | monitor.bylucas.eu | 3005 | basic auth, 3600 s timeout |
+| `monitoring` | node | monitor.bylucas.eu | 3005 | basic auth, 3600 s timeout, `large_transfers` |
 
 #### `postgresql_app_users` — application databases
 
@@ -395,12 +396,41 @@ never `latest`).
 
 Defaults: `minecraft_heap: 4G`, `minecraft_cf_slug: homestead-cozy`,
 `minecraft_cf_file_id` (commented out — set it to pin the modpack version).
+The slug/file ID are only the **initial** values: afterwards the modpack is
+changed from the monitoring dashboard (Minecraft panel).
 
 - Persistent data: `/var/minecraft-homestead-data` → `/data`.
-- If no `homestead` container exists: `docker run` of
-  `itzg/minecraft-server:java17` with `TYPE=AUTO_CURSEFORGE`, the CurseForge
-  API key from the vault, `MEMORY=4G`, **public** port `25565`,
-  `--restart unless-stopped`.
+- Installs `zip`, `unzip`, `jq` (used by `minecraft-ctl`).
+- Panel folders, owned by `lucas`, 0700: `/var/lib/minecraft-panel/`
+  (`config.json` = current modpack, written by the monitoring app) and
+  `/var/minecraft-uploads/` (uploaded world zip, waiting to be imported).
+- `config.json` is created with `force: false`: **Ansible never overwrites
+  a modpack chosen from the panel.**
+- CurseForge API key copied to `/etc/minecraft/cf_api_key` (root, 0600), so
+  it's no longer passed on an Ansible command line.
+- `/usr/local/sbin/minecraft-ctl` (root, 0750, from `minecraft-ctl.j2`): the
+  **only** root entry point of the panel. Fixed subcommands, no free
+  arguments; values read from `config.json` (untrusted, written by the app)
+  are re-validated by regex.
+
+  | Subcommand | What it does |
+  |---|---|
+  | `start` / `stop` / `restart` | `docker start/stop/restart homestead` (60 s stop timeout so the world gets saved) |
+  | `apply` | Recreates the container with the modpack of `config.json` (world volume kept) |
+  | `apply-clean` | Same, after backing up the world and deleting `mods/`, `config/`, `.curseforge*` |
+  | `create` | Creates the container only if it doesn't exist (used by Ansible) |
+  | `export-world` | Streams a zip of the world to stdout (`save-off` + `save-all flush` via RCON during the copy) |
+  | `import-world` | Validates `/var/minecraft-uploads/incoming.zip` (valid zip, no `..`/absolute paths, contains `level.dat`, ≤ 8 GB unzipped), stops the server, backs up the old world, swaps it in, `chown 1000:1000`, starts the server |
+
+  World backups: `/var/minecraft-backups/world-<date>.tar.gz`, **5 kept**.
+- `/etc/sudoers.d/minecraft-panel` (from `minecraft-sudoers.j2`, validated
+  with `visudo -cf`): `lucas` may run exactly
+  `minecraft-ctl start|stop|restart|apply|apply-clean|export-world|import-world`
+  without a password (no wildcard, `create` excluded).
+- Container: `minecraft-ctl create` → `itzg/minecraft-server:java17` with
+  `TYPE=AUTO_CURSEFORGE`, `CF_SLUG` (+ `CF_FILE_ID`) from `config.json`,
+  `MEMORY={{ minecraft_heap }}`, **public** port `25565`,
+  `--restart unless-stopped`. An existing container is left untouched.
 - The only service exposed directly to the Internet without nginx.
 
 ### 4.11 `app-deploy`
@@ -472,6 +502,8 @@ server {
         proxy_pass http://localhost:<port>;
         proxy_set_header Host / X-Real-IP / X-Forwarded-For / X-Forwarded-Proto ...;
         proxy_read_timeout / proxy_send_timeout <proxy_timeout|60>s;
+        # if large_transfers: client_max_body_size 4g;
+        #                     proxy_request_buffering off; proxy_buffering off;
     }
 }
 ```
@@ -537,6 +569,10 @@ on the infrastructure:
 This file is **also what lets GitHub Actions** run
 `sudo systemctl restart <name>` without a password (same `lucas` user).
 
+The Minecraft panel has its own, separate sudoers file
+(`/etc/sudoers.d/minecraft-panel`), installed by the `minecraft-homestead`
+role (see §4.10).
+
 ---
 
 ## 6. What the VPS looks like after a run
@@ -556,6 +592,9 @@ This file is **also what lets GitHub Actions** run
 /etc/letsencrypt/live/<subdomain>/         # certificates
 /etc/systemd/system/<name>.service         # one per non-static project
 /etc/sudoers.d/monitoring-restart
+/etc/sudoers.d/minecraft-panel             # minecraft-ctl subcommands for lucas
+/etc/minecraft/cf_api_key                  # CurseForge API key (root, 0600)
+/usr/local/sbin/minecraft-ctl              # root entry point of the Minecraft panel
 /etc/services-manifest.json
 /etc/infra-manifest.json
 /usr/local/bin/pg_backup.sh                # + root crontab 03:00
@@ -563,7 +602,10 @@ This file is **also what lets GitHub Actions** run
 /var/www/<static-project>/                 # filled by the CD (content of out/)
 /home/lucas/apps/<project>/                # filled by the CD (code) + .env (Ansible)
 /var/warp10-data/                          # Warp10 data
-/var/minecraft-homestead-data/             # Minecraft world
+/var/minecraft-homestead-data/             # Minecraft world, mods, server.properties
+/var/lib/minecraft-panel/config.json       # current modpack (written by the panel)
+/var/minecraft-uploads/                    # uploaded world zip before import
+/var/minecraft-backups/                    # world backups (5 kept)
 /swapfile                                  # 4 GB
 ```
 
@@ -723,7 +765,8 @@ regenerate the manifests and the sudoers.
 | nginx vhosts | **Never** rewritten once managed by Certbot |
 | Certificates | Never re-requested if they exist (`creates:`); renewed by `certbot.timer` |
 | PostgreSQL users/DBs | Created if missing; password updated if it changes |
-| Warp10 / Minecraft containers | Created **only if they don't exist**. Changing `warp10_version`, `warp10_heap`, `minecraft_heap`... has no effect while the container exists → `docker rm -f <name>` then re-run (data lives in the `/var/...-data` volumes) |
+| Warp10 / Minecraft containers | Created **only if they don't exist**. Changing `warp10_version`, `warp10_heap`... has no effect while the container exists → `docker rm -f <name>` then re-run (data lives in the `/var/...-data` volumes) |
+| Minecraft modpack / heap | `config.json` is never overwritten (`force: false`) → change the modpack from the panel. `minecraft_heap` is baked into `minecraft-ctl`: after a re-run, click "Appliquer" in the panel to recreate the container with the new heap |
 | Swap | Created only if no swap is active |
 | Node.js | Installed only if `node` is missing (never upgraded) |
 
@@ -761,6 +804,12 @@ regenerate the manifests and the sudoers.
   play (it keeps the existing certificate, harmless), and the sudoers
   `--cert-name catTree.bylucas.eu` entries don't match the real certificate
   name. Use lowercase subdomains.
+- **`large_transfers` on the existing `monitoring` vhost**: the vhost was
+  already Certbot-managed, so the playbook didn't re-render it. The three
+  lines were added by hand in the `location /` of the 443 block on
+  2026-10-18 (backup: `/root/monitoring.nginx.bak-20261018-154609`), then
+  `sudo nginx -t && sudo systemctl reload nginx`. On a fresh VPS the
+  template handles it.
 - **Docker and UFW**: a `-p 8080:8080` (without `127.0.0.1:`) would be
   publicly exposed despite UFW. Always prefix internal services with
   `127.0.0.1:`.
