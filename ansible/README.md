@@ -395,22 +395,30 @@ never `latest`).
 ### 4.10 `minecraft-homestead`
 
 Defaults: `minecraft_heap: 4G`, `minecraft_cf_slug: homestead-cozy`,
-`minecraft_cf_file_id` (commented out — set it to pin the modpack version).
+`minecraft_cf_file_id` (commented out — set it to pin the modpack version),
+`minecraft_view_distance: 8`, `minecraft_simulation_distance: 6` (fewer
+chunks to generate and tick around each player; the modpack already ships
+C2ME, Lithium and Chunky).
 The slug/file ID are only the **initial** values: afterwards the modpack is
 changed from the monitoring dashboard (Minecraft panel).
+`minecraft_extra_mods`: Modrinth mods installed on top of the modpack, per
+modpack slug (currently Create: Dragons Plus + Create: Enchantment Industry
+for `homestead-cozy`). Also only the initial value: afterwards the list is
+managed from the panel ("Extra mods").
 
 - Persistent data: `/var/minecraft-homestead-data` → `/data`.
 - Installs `zip`, `unzip`, `jq` (used by `minecraft-ctl`).
 - Panel folders, owned by `lucas`, 0700: `/var/lib/minecraft-panel/`
   (`config.json` = current modpack, written by the monitoring app) and
   `/var/minecraft-uploads/` (uploaded world zip, waiting to be imported).
-- `config.json` is created with `force: false`: **Ansible never overwrites
-  a modpack chosen from the panel.**
+- `config.json` and `mods.json` (extra mods, `{"<slug>": [...]}`) are
+  created with `force: false`: **Ansible never overwrites a modpack or a mod
+  list changed from the panel.**
 - CurseForge API key copied to `/etc/minecraft/cf_api_key` (root, 0600), so
   it's no longer passed on an Ansible command line.
 - `/usr/local/sbin/minecraft-ctl` (root, 0750, from `minecraft-ctl.j2`): the
   **only** root entry point of the panel. Fixed subcommands, no free
-  arguments; values read from `config.json` and `request.json` (untrusted,
+  arguments; values read from `config.json`, `mods.json` and `request.json` (untrusted,
   written by the app) are re-validated by regex. Error messages (stderr) are
   in English because the panel shows them as-is. A `flock` on
   `/run/minecraft-ctl.lock` allows one operation at a time (except
@@ -420,15 +428,16 @@ changed from the monitoring dashboard (Minecraft panel).
   | Subcommand | What it does |
   |---|---|
   | `start` / `stop` / `restart` | `docker start/stop/restart homestead` (60 s stop timeout so the world gets saved) |
-  | `apply` | Recreates the container with the modpack of `config.json` (world volume kept) |
+  | `apply` | Recreates the container with the modpack of `config.json` (world volume kept), after syncing that modpack's extra mods |
   | `apply-clean` | Same, after backing up the world and deleting `mods/`, `config/`, `.curseforge*` |
-  | `create` | Creates the container only if it doesn't exist (used by Ansible) |
+  | `create` | Creates the container only if it doesn't exist (used by Ansible), extra mods synced first |
+  | `sync-mods` | Aligns `mods/` with the extra mods of the container's modpack in `mods.json`: each version is fetched from the Modrinth API, its primary jar downloaded from `cdn.modrinth.com` only and checked against its SHA-512; jars from a previous sync that are no longer listed are deleted (tracked in `/var/minecraft-homestead-data/.panel-mods.json`; the modpack's own jars are never touched). Restarts the server only if something changed and it is running. Prints `changed` / `unchanged` (Ansible uses it for `changed_when`) |
   | `export-world` | Streams a zip of the world to stdout (`save-off` + `save-all flush` via RCON during the copy) |
   | `import-world` | Validates `/var/minecraft-uploads/incoming.zip` (valid zip, no `..`/absolute paths, contains `level.dat`, ≤ 8 GB unzipped), stops the server, backs up the old world, swaps it in, `chown 1000:1000`, starts the server |
   | `new-world` | Stops, backs up and deletes the world, empties `level-seed` in `server.properties`, starts → new world with a random seed, same modpack |
   | `save-world` | Manual hot backup (`save-off` + `save-all flush` during the copy) |
   | `list-backups` | Prints every backup as JSON (`id`, `slug`, `fileId`, `reason`, `createdAt`, `size`), newest first |
-  | `restore-world` | Restores the backup named in `/var/lib/minecraft-panel/request.json` (`{"id": "<slug>/<stamp>"}`): extracts it, stops, backs up the current world, swaps it in. If the backup's modpack differs from the container's, also writes it to `config.json`, cleans the mods and recreates the container |
+  | `restore-world` | Restores the backup named in `/var/lib/minecraft-panel/request.json` (`{"id": "<slug>/<stamp>"}`): extracts it, stops, backs up the current world, swaps it in. If the backup's modpack differs from the container's, also writes it to `config.json`, cleans the mods, syncs that modpack's extra mods and recreates the container |
   | `delete-backup` | Deletes the backup named in `request.json` |
 
   World backups, **grouped by modpack**:
@@ -442,12 +451,22 @@ changed from the monitoring dashboard (Minecraft panel).
   automatically.
 - `/etc/sudoers.d/minecraft-panel` (from `minecraft-sudoers.j2`, validated
   with `visudo -cf`): `lucas` may run exactly
-  `minecraft-ctl start|stop|restart|apply|apply-clean|export-world|import-world|new-world|save-world|list-backups|restore-world|delete-backup`
+  `minecraft-ctl start|stop|restart|apply|apply-clean|sync-mods|export-world|import-world|new-world|save-world|list-backups|restore-world|delete-backup`
   without a password (no wildcard, `create` excluded).
 - Container: `minecraft-ctl create` → `itzg/minecraft-server:java17` with
   `TYPE=AUTO_CURSEFORGE`, `CF_SLUG` (+ `CF_FILE_ID`) from `config.json`,
-  `MEMORY={{ minecraft_heap }}`, **public** port `25565`,
-  `--restart unless-stopped`. An existing container is left untouched.
+  `MEMORY={{ minecraft_heap }}`, `USE_AIKAR_FLAGS=true` (G1GC tuned for
+  Minecraft, shorter pauses), `SYNC_CHUNK_WRITES=false` (chunk saves don't
+  block the server thread), `VIEW_DISTANCE` / `SIMULATION_DISTANCE`,
+  **public** port `25565`, `--restart unless-stopped`. An existing container
+  is left untouched: after changing these settings, re-run the playbook then
+  click **Apply** in the panel (recreates the container, world kept).
+- Faster exploration: pre-generate the world once with Chunky (already in the
+  modpack), e.g. `docker exec homestead rcon-cli chunky radius 3000` then
+  `docker exec homestead rcon-cli chunky start` (`chunky progress` to follow).
+  Takes hours and uses CPU, best run when nobody plays.
+- Then `minecraft-ctl sync-mods` installs the extra mods (no restart when
+  nothing changed, so re-running the playbook is harmless).
 - The only service exposed directly to the Internet without nginx.
 
 ### 4.11 `app-deploy`

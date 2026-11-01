@@ -43,6 +43,15 @@
     mode: "0600"
     force: false
 
+- name: Mods en plus du modpack, initiaux (n'écrase jamais ce que le panneau a modifié)
+  ansible.builtin.copy:
+    dest: /var/lib/minecraft-panel/mods.json
+    content: "{{ minecraft_extra_mods | to_nice_json }}"
+    owner: "{{ ssh_user }}"
+    group: "{{ ssh_user }}"
+    mode: "0600"
+    force: false
+
 - name: Installer minecraft-ctl
   ansible.builtin.template:
     src: minecraft-ctl.j2
@@ -63,6 +72,11 @@
 - name: Créer le conteneur s'il n'existe pas encore
   ansible.builtin.command: /usr/local/sbin/minecraft-ctl create
   changed_when: false
+
+- name: Installer les mods en plus du modpack (redémarre le serveur seulement s'ils changent)
+  ansible.builtin.command: /usr/local/sbin/minecraft-ctl sync-mods
+  register: minecraft_sync_mods
+  changed_when: minecraft_sync_mods.stdout == "changed"
 
 - name: S'assurer que le conteneur démarre au boot
   ansible.builtin.command: docker update --restart unless-stopped homestead

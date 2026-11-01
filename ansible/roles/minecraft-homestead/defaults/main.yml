@@ -6,9 +6,40 @@
 # sessions de jeu réelles.
 minecraft_heap: "4G"
 
+# Chargement des chunks. Le modpack embarque déjà C2ME/Lithium/Chunky : ce
+# qui coûte, c'est le nombre de chunks à générer autour de chaque joueur
+# (rayon 10 = 441 chunks, rayon 8 = 289) et à faire tourner (simulation).
+# Appliqué à la recréation du conteneur (bouton "Apply" du panneau).
+minecraft_view_distance: 8
+minecraft_simulation_distance: 6
+
 # Slug CurseForge du modpack (dernière partie de son URL)
 minecraft_cf_slug: "homestead-cozy"
 
 # Fige une version précise pour que tous les joueurs aient exactement la
 # même que le serveur. Trouve l'ID dans l'URL du fichier, onglet "Files".
 # minecraft_cf_file_id: "123456"
+
+# Mods Modrinth ajoutés par-dessus le modpack, par slug de modpack. Ne sert
+# qu'à initialiser /var/lib/minecraft-panel/mods.json : ensuite c'est le
+# gestionnaire de mods du panneau qui fait foi (le fichier n'est jamais écrasé).
+# minecraft-ctl n'utilise que versionId ; le reste est affiché par le panneau.
+# dependsOn : mods de cette liste requis par celui-ci (bloque leur retrait).
+minecraft_extra_mods:
+  homestead-cozy:
+    - projectId: dzb1a5WV
+      slug: create-dragons-plus
+      title: "Create: Dragons Plus"
+      versionId: 3OLCjra2
+      versionNumber: "1.11.8"
+      fileName: create-dragons-plus-fabric-1.20.1-1.11.8.jar
+      url: https://cdn.modrinth.com/data/dzb1a5WV/versions/3OLCjra2/create-dragons-plus-fabric-1.20.1-1.11.8.jar
+      dependsOn: []
+    - projectId: JWGBpFUP
+      slug: create-enchantment-industry
+      title: "Create: Enchantment Industry"
+      versionId: Or9rfT7c
+      versionNumber: "2.5.2-g"
+      fileName: create-enchantment-industry-fabric-1.20.1-2.5.2-g.jar
+      url: https://cdn.modrinth.com/data/JWGBpFUP/versions/Or9rfT7c/create-enchantment-industry-fabric-1.20.1-2.5.2-g.jar
+      dependsOn: [dzb1a5WV]

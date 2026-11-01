@@ -11,17 +11,26 @@ DATA=/var/minecraft-homestead-data
 STATE=/var/lib/minecraft-panel
 CONFIG=$STATE/config.json       # écrit par l'appli (non fiable) -> validé ici
 REQUEST=$STATE/request.json     # sauvegarde visée par restore/delete (non fiable)
+MODS_LIST=$STATE/mods.json      # mods Modrinth en plus du modpack, par slug (non fiable)
+MODS_TRACK=$DATA/.panel-mods.json  # jars posés par sync_mods (pour pouvoir les retirer)
 UPLOAD=/var/minecraft-uploads/incoming.zip
 BACKUPS=/var/minecraft-backups  # <slug>/<AAAAMMJJ-HHMMSS>.tar.gz + .json
 CF_KEY_FILE=/etc/minecraft/cf_api_key
 HEAP="{{ minecraft_heap }}"
+VIEW_DISTANCE="{{ minecraft_view_distance }}"
+SIMULATION_DISTANCE="{{ minecraft_simulation_distance }}"
 IMAGE="itzg/minecraft-server:java17"
 MAX_UNZIPPED_MB=8192
 KEEP_AUTO=5                     # sauvegardes automatiques gardées par modpack
+MODRINTH_API=https://api.modrinth.com/v2
+USER_AGENT="bylucas/minecraft-ctl (monitor.bylucas.eu)"
 
 SLUG_RE='^[a-z0-9][a-z0-9-]{0,79}$'
 FILE_ID_RE='^[0-9]{1,10}$'
 STAMP_RE='^[0-9]{8}-[0-9]{6}$'
+VERSION_ID_RE='^[A-Za-z0-9]{8}$'
+JAR_RE='^[A-Za-z0-9][A-Za-z0-9._+-]{0,150}\.jar$'
+SHA512_RE='^[0-9a-f]{128}$'
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -102,7 +111,50 @@ pause_saving() {
 }
 
 clean_mods() {
-  rm -rf -- "$DATA/mods" "$DATA/config" "$DATA/.curseforge" "$DATA"/.curseforge-* 2>/dev/null || true
+  rm -rf -- "$DATA/mods" "$DATA/config" "$DATA/.curseforge" "$DATA"/.curseforge-* "$MODS_TRACK" 2>/dev/null || true
+}
+
+config_slug() {
+  local s; s=$(jq -r '.slug // empty' "$CONFIG" 2>/dev/null || true)
+  [[ "$s" =~ $SLUG_RE ]] || die "invalid modpack slug"
+  echo "$s"
+}
+
+# sync_mods <slug> : aligne mods/ sur la liste $MODS_LIST[<slug>] (versions
+# Modrinth). Chaque jar vient de cdn.modrinth.com et est vérifié en SHA-512 ;
+# ceux posés par une synchro précédente et absents de la liste sont retirés.
+# Les jars du modpack ne sont jamais touchés. SYNC_CHANGED=1 si mods/ a changé.
+sync_mods() {
+  local slug=$1 id v url name sha tmp want=() old
+  SYNC_CHANGED=0
+  mkdir -p "$DATA/mods"
+  for id in $(jq -r --arg s "$slug" '.[$s] // [] | .[].versionId' "$MODS_LIST" 2>/dev/null || true); do
+    [[ "$id" =~ $VERSION_ID_RE ]] || die "invalid mod version id"
+    v=$(curl -fsS --max-time 30 -A "$USER_AGENT" "$MODRINTH_API/version/$id") || die "Modrinth unreachable (version $id)"
+    v=$(jq -c '(.files | map(select(.primary)) | .[0]) // .files[0]' <<<"$v")
+    url=$(jq -r .url <<<"$v"); name=$(jq -r .filename <<<"$v"); sha=$(jq -r .hashes.sha512 <<<"$v")
+    [[ "$url" == https://cdn.modrinth.com/* ]] || die "unexpected download host for $id"
+    [[ "$name" =~ $JAR_RE && "$sha" =~ $SHA512_RE ]] || die "unexpected mod file for $id"
+    want+=("$name")
+    echo "$sha  $DATA/mods/$name" | sha512sum -c --status 2>/dev/null && continue
+    tmp=$(mktemp "$DATA/mods/.download.XXXXXX")
+    curl -fsSL --max-time 300 -A "$USER_AGENT" -o "$tmp" "$url" || { rm -f -- "$tmp"; die "download failed: $name"; }
+    echo "$sha  $tmp" | sha512sum -c --status || { rm -f -- "$tmp"; die "checksum mismatch: $name"; }
+    chown 1000:1000 "$tmp"; chmod 644 "$tmp"
+    mv -f -- "$tmp" "$DATA/mods/$name"
+    SYNC_CHANGED=1
+  done
+  for old in $(jq -r '.[]?' "$MODS_TRACK" 2>/dev/null || true); do
+    [[ "$old" =~ $JAR_RE ]] || continue
+    [[ " ${want[*]} " == *" $old "* ]] && continue
+    rm -f -- "$DATA/mods/$old"
+    SYNC_CHANGED=1
+  done
+  jq -n '$ARGS.positional' --args "${want[@]}" > "$MODS_TRACK"
+}
+
+is_running() {
+  [ "$(docker inspect -f '{{ '{{.State.Running}}' }}' "$NAME" 2>/dev/null)" = true ]
 }
 
 run_container() {
@@ -112,7 +164,11 @@ run_container() {
   [[ -z "$file_id" || "$file_id" =~ $FILE_ID_RE ]] || die "invalid file ID"
   local args=(run -d --name "$NAME" --restart unless-stopped -p 25565:25565
     -e EULA=TRUE -e TYPE=AUTO_CURSEFORGE -e "CF_API_KEY=$(cat "$CF_KEY_FILE")"
-    -e "CF_SLUG=$slug" -e "MEMORY=$HEAP" -v "$DATA:/data")
+    -e "CF_SLUG=$slug" -e "MEMORY=$HEAP" -v "$DATA:/data"
+    # Chunks : flags GC d'Aikar (moins de pauses), écritures de chunks non
+    # bloquantes, distances réduites (voir defaults/main.yml).
+    -e USE_AIKAR_FLAGS=true -e SYNC_CHUNK_WRITES=false
+    -e "VIEW_DISTANCE=$VIEW_DISTANCE" -e "SIMULATION_DISTANCE=$SIMULATION_DISTANCE")
   [ -n "$file_id" ] && args+=(-e "CF_FILE_ID=$file_id")
   docker "${args[@]}" "$IMAGE" >/dev/null
 }
@@ -140,10 +196,25 @@ case "${1:-}" in
       backup_world before-modpack-change
       clean_mods
     fi
+    sync_mods "$(config_slug)"
     recreate_container ;;
 
   create)  # utilisé par Ansible au premier déploiement
-    docker inspect "$NAME" >/dev/null 2>&1 || run_container ;;
+    if ! docker inspect "$NAME" >/dev/null 2>&1; then
+      sync_mods "$(config_slug)"
+      run_container
+    fi ;;
+
+  sync-mods)
+    # Après un changement de la liste dans le panneau (ou par Ansible).
+    # Redémarre le serveur seulement si mods/ a changé et qu'il tourne.
+    sync_mods "$(current_slug)"
+    if [ "$SYNC_CHANGED" = 1 ]; then
+      is_running && docker restart -t 60 "$NAME" >/dev/null
+      echo changed
+    else
+      echo unchanged
+    fi ;;
 
   export-world)
     # Zip en flux sur stdout (jamais de fichier temporaire de la taille du monde).
@@ -218,6 +289,7 @@ case "${1:-}" in
       jq -n --arg slug "$target_slug" --arg fileId "$target_file_id" '{slug: $slug, fileId: $fileId}' > "$CONFIG.tmp"
       cat "$CONFIG.tmp" > "$CONFIG"; rm -f -- "$CONFIG.tmp"   # garde propriétaire et droits
       clean_mods
+      sync_mods "$target_slug"
       recreate_container
     else
       docker start "$NAME" >/dev/null
@@ -228,5 +300,5 @@ case "${1:-}" in
     rm -f -- "$REQ_DIR/$REQ_STAMP.tar.gz" "$REQ_DIR/$REQ_STAMP.json" "$REQUEST"
     rmdir "$REQ_DIR" 2>/dev/null || true ;;
 
-  *) die "usage: minecraft-ctl start|stop|restart|apply|apply-clean|create|export-world|import-world|new-world|save-world|list-backups|restore-world|delete-backup" ;;
+  *) die "usage: minecraft-ctl start|stop|restart|apply|apply-clean|create|sync-mods|export-world|import-world|new-world|save-world|list-backups|restore-world|delete-backup" ;;
 esac
